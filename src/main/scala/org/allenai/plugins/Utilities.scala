@@ -1,6 +1,17 @@
 package org.allenai.plugins
 
-import sbt.{ inProjects, Artifact, Def, ModuleID, Keys, ScopeFilter, Task }
+import sbt.{
+  inProjects,
+  Artifact,
+  AttributeKey,
+  Attributed,
+  Def,
+  File,
+  ModuleID,
+  Keys,
+  ScopeFilter,
+  Task
+}
 
 /** Helper methods and values for building plugins. */
 object Utilities {
@@ -14,29 +25,56 @@ object Utilities {
     ScopeFilter(inProjects(localDependencies: _*))
   }
 
-  /** Construct a unique jar name from a given module ID and artifact. This will be of the form:
+  /** Construct a unique jar name from the given module and artifact data. This will be of the form:
     * {{{
-    * "${module.organization}.${module.name}-" +
-    *   "${artifact.name}-${module.revision}-${artifact.classifier}".jar
+    * "${organization}.${moduleName}-${artifactName}-${revision}-${classifier}".jar
     * }}}
     * Classifier will be dropped if it's unset. The artifact name will be dropped if it exactly
     * matches the module name, and will have the module name stripped out regardless.
     */
-  def buildJarName(module: ModuleID, artifact: Artifact): String = {
-    val jarName = new StringBuilder(module.organization).append('.').append(module.name)
+  def jarName(
+    organization: String,
+    moduleName: String,
+    artifactName: String,
+    revision: String,
+    classifier: Option[String]
+  ): String = {
+    val jarName = new StringBuilder(organization).append('.').append(moduleName).append('-')
 
     // Elide the artifact name if it exactly matches the module name.
-    if (module.name != artifact.name && artifact.name.nonEmpty) {
+    if (moduleName != artifactName && artifactName.nonEmpty) {
       // Replace any occurance of the module name, to remove redundancy.
-      val strippedArtifactName = artifact.name.replace(module.name, "")
-      jarName.append('-').append(strippedArtifactName)
+      val strippedArtifactName = artifactName.replace(moduleName, "")
+      jarName.append(strippedArtifactName).append('-')
     }
 
-    jarName.append('-').append(module.revision)
-    if (artifact.classifier.nonEmpty) {
-      jarName.append('-').append(artifact.classifier)
+    jarName.append(revision)
+
+    if (classifier.nonEmpty) {
+      jarName.append('-').append(classifier)
     }
 
     jarName.append(".jar").toString
+  }
+
+  /** Return the jar name for a given dependency file.
+    * @param file the dependency file with attributes describing module and artifact
+    * @return the descriptive filename the dependency jar can go into
+    */
+  def jarNameForFile(file: Attributed[File]): String = {
+    val moduleIdOption = file.metadata.get(AttributeKey[ModuleID]("module-id"))
+    val artifactOption = file.metadata.get(AttributeKey[Artifact]("artifact"))
+    val generatedNameOption = moduleIdOption.zip(artifactOption).headOption.map {
+      case (moduleId, artifact) =>
+        jarName(
+          organization = moduleId.organization,
+          moduleName = moduleId.name,
+          artifactName = artifact.name,
+          revision = moduleId.revision,
+          classifier = artifact.classifier
+        )
+    }
+    // Fall back on the embedded name.
+    generatedNameOption.getOrElse(file.data.getName)
   }
 }
