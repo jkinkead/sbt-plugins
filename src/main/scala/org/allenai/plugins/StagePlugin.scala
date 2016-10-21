@@ -10,9 +10,9 @@ import sbt.{
   AutoPlugin,
   BuildDependencies,
   Compile,
+  ConfigKey,
   Def,
   Extracted,
-  File,
   Hash,
   IO,
   Keys,
@@ -28,6 +28,8 @@ import sbt.{
 }
 import sbt.plugins.JvmPlugin
 
+import java.io.File
+
 import scala.collection.mutable
 
 /** Plugin to add a `allenai:stage` command mimicking the behavior in the sbt-native-packager
@@ -40,10 +42,24 @@ import scala.collection.mutable
 object StagePlugin extends AutoPlugin {
   override def requires: Plugins = JvmPlugin
 
-  object autoImport {
-    val AllenAi = Utilities.AllenAi
+  /** A script to run the staged service as a daemon (in the background). This used to be called
+    * "run-class.sh".
+    */
+  val RUN_DAEMON = "run-daemon.sh"
 
-    val stage = taskKey[File]("Builds and stages the project for deploy")
+  /** A script to run the staged service in the foreground. This is most useful for running in
+    * Docker.
+    */
+  val RUN_DIRECT = "run-direct.sh"
+
+  object autoImport {
+    val Docker = ConfigKey("docker")
+
+    val dependencyStage: TaskKey[File] = taskKey[File](
+      "Builds a dependency-stage directory with all required libraries for build execution"
+    )
+
+    val stage: TaskKey[File] = taskKey[File]("Builds and stages the project for deploy")
   }
 
   /** Task initializer to look up local artifacts for the current project. This is the jar built
@@ -140,49 +156,49 @@ object StagePlugin extends AutoPlugin {
     }
 
     // Copy all of the other files as directed.
-    Keys.mappings.in(autoImport.AllenAi).value.foreach {
+    Keys.mappings.in(autoImport.Docker).value.foreach {
       case (file, destination) =>
         val destinationFile = stagePath.resolve(destination).toFile
-        Keys.streams.value.log.info(s"Considering copying $file to $destinationFile")
         if (file.isFile) {
           IO.copyFile(file, destinationFile)
         }
     }
 
-    // TODO: Copy run-class.sh and run-docker.sh.
+    // Copy the run scripts.
+    // TODO(jkinkead): Make these templated on the main class and java options in the project.
+    // TODO(jkinkead): Merge into one script OR remove the daemon script.
+    val binPath = stagePath.resolve("bin")
+    Seq(RUN_DAEMON, RUN_DIRECT).foreach { script =>
+      val destination = binPath.resolve(script).toFile
+      Utilities.copyResourceToFile(getClass, script, destination)
+      destination.setExecutable(true)
+    }
 
     // TODO: Build up a cache hash.
 
     stageDir
   }
 
-  /** Extra mappings to add to `mappings.in(AllenAi)`. By default, this maps `src/main/resources` to
+  /** Extra mappings to add to `mappings.in(Docker)`. By default, this maps `src/main/conf` to
     * `conf` as well as `src/main/bin` to `bin`.
     */
   lazy val extraMappingsTask: Def.Initialize[Task[Seq[(File, String)]]] = Def.task {
     val sourceMain = Keys.sourceDirectory.value.toPath.resolve("main")
+    // Copy src/main/{bin,conf} to the staging directory.
     // See http://www.scala-sbt.org/0.12.3/docs/Detailed-Topics/Mapping-Files.html
     // for more info on sbt mappings.
-    val resourcesToConf = PathFinder(sourceMain.resolve("resources").toFile).***
-      .pair(rebase(sourceMain.resolve("resources").toFile, "conf"))
-
-    val binToBin = PathFinder(sourceMain.resolve("bin").toFile).***
-      .pair(relativeTo(sourceMain.toFile))
-
-    (resourcesToConf ++ binToBin).map { v =>
-      Keys.streams.value.log.info(s"found $v")
-      v
-    }
+    Seq("bin", "conf").map { dir =>
+      PathFinder(sourceMain.resolve(dir).toFile).***.pair(relativeTo(sourceMain.toFile))
+    }.flatten
   }
 
   // NOTES:
-  // - MappingsHelper builds up the copying rules for the universal packager
   // - scriptClasspathOrdering contains logic for building up an ordered
   //   classpath (probably matching that of `sbt run`)
 
   /** Adds the settings to configure the `allenai:stage` command. */
   override def projectSettings: Seq[Def.Setting[_]] = Seq(
-    autoImport.stage.in(autoImport.AllenAi) := stageTask.value,
-    Keys.mappings.in(autoImport.AllenAi) := extraMappingsTask.value
+    autoImport.stage.in(autoImport.Docker) := stageTask.value,
+    Keys.mappings.in(autoImport.Docker) := extraMappingsTask.value
   )
 }

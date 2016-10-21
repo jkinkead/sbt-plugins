@@ -6,16 +6,15 @@ import sbt.{
   Attributed,
   ConfigKey,
   Def,
-  File,
+  IO,
   ModuleID,
   Keys
 }
 
+import java.io.File
+
 /** Helper methods and values for building plugins. */
 object Utilities {
-  /** Configuration key for AI2 items. */
-  val AllenAi = ConfigKey("allenai")
-
   /** Construct a unique jar name from the given module and artifact data. This will be of the form:
     * {{{
     * "${module.organization}.${module.name}-${artifact.name}-" +
@@ -43,17 +42,20 @@ object Utilities {
     jarName.append(".jar").toString
   }
 
-  /** Return the jar name for a given dependency file.
-    * @param file the dependency file with attributes describing module and artifact
-    * @return the descriptive filename the dependency jar can go into
+  /** Copies a class resource with the given name to a given location.
+    * @param clazz the class to load the resource from
+    * @param resourceName the name of the resource to copy
+    * @param destination the destination file for the resource
     */
-  def jarNameForFile(file: Attributed[File]): String = {
-    val moduleIdOption = file.metadata.get(AttributeKey[ModuleID]("module-id"))
-    val artifactOption = file.metadata.get(AttributeKey[Artifact]("artifact"))
-    val generatedNameOption = moduleIdOption.zip(artifactOption).headOption.map {
-      case (moduleId, artifact) => jarName(moduleId, artifact)
+  def copyResourceToFile(clazz: Class[_], resourceName: String, destination: File): Unit = {
+    val contents = {
+      val is = clazz.getResourceAsStream(resourceName)
+      try {
+        IO.readBytes(is)
+      } finally {
+        is.close()
+      }
     }
-    // Fall back on the embedded name.
-    generatedNameOption.getOrElse(file.data.getName)
+    IO.write(destination, contents)
   }
 }
