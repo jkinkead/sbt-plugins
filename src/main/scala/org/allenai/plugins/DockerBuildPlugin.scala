@@ -19,6 +19,8 @@ import sbt.plugins.JvmPlugin
 
 import java.io.File
 
+import scala.sys.process.Process
+
 /** Plugin for building docker images. */
 object DockerBuildPlugin extends AutoPlugin {
   val AI2_PRIVATE_REGISTRY = "allenai-docker-private-docker.bintray.io"
@@ -155,6 +157,13 @@ object DockerBuildPlugin extends AutoPlugin {
     fullImageName.value + "-dependencies"
   }
 
+  /** Task which requires that `docker` exists on the commandline path. */
+  lazy val requireDocker: Def.Initialize[Task[Unit]] = Def.task {
+    if (Process(Seq("which", "docker")).! != 0) {
+      sys.error("`docker` not found on path. Please install the docker client before using this.")
+    }
+  }
+
   //////////////////////////////////////////////////////////////////////////////////////////////////
   // Common settings used across tasks.
   //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -198,6 +207,13 @@ object DockerBuildPlugin extends AutoPlugin {
   /** The location of the staged dependency image's startup script. */
   lazy val dependencyImageStartupScript: Def.Initialize[File] = Def.setting {
     new File(dependencyImageBinDir.value, STARTUP_SCRIPT_NAME)
+  }
+
+  /** The location of the staged dependency image's hash file, containing a hash of the image
+    * contents.
+    */
+  lazy val dependencyHashFile: Def.Initialize[File] = Def.setting {
+    new File(dockerTargetDir.value, "dependencies.sha1")
   }
 
   //////////////////////////////////////////////////////////////////////////////////////////////////
@@ -371,6 +387,50 @@ $DOCKERFILE_SIGIL
     imageDirectory
   }
 
+  /** Task to build a docker image containing the dependencies of the current project. This is used
+    * as a base image for the main project image.
+    */
+  lazy val dependencyBuildDef: Def.Initialize[Task[Unit]] = Def.task {
+    val logger = Keys.streams.value.log
+
+    // This task requires docker to be installed.
+    requireDocker.value
+
+    // Calculate the checksum of the Dockerfile and dependency files.
+    val libFiles = dependencyLibDir.value.listFiles
+    val dockerfile = dependencyDockerfile.value
+    val dependencyHash = Utilities.hashFiles(libFiles :+ dockerfile, dependencyImageDir.value)
+
+    // Check to see if the dependency contents have changed since the last time we sent them to
+    // docker.
+    val hashFile = dependencyHashFile.value
+    val oldDependencyHash = if (hashFile.exists) {
+      IO.read(hashFile)
+    } else {
+      ""
+    }
+
+    if (dependencyHash != oldDependencyHash) {
+      // Build a new docker image.
+      val dockerCommand = Seq(
+        "docker",
+        "build",
+        "-t", dependencyImageName.value,
+        dependencyImageDir.value.toString
+      )
+      logger.info("Building dependency image . . .")
+      val exitCode = Process(dockerCommand).!
+      if (exitCode != 0) {
+        sys.error("Error running " + dockerCommand.mkString(" "))
+      }
+
+      // Write out the hash file.
+      IO.write(hashFile, dependencyHash)
+    } else {
+      logger.info("Dependency image unchanged.")
+    }
+  }
+
   /** Task to stage the main docker image for the project. */
   lazy val mainImageStageDef: Def.Initialize[Task[File]] = Def.task {
     val logger = Keys.streams.value.log
@@ -430,6 +490,33 @@ $DOCKERFILE_SIGIL
     imageDirectory
   }
 
+  /** Task to build the main docker image for the project. This returns the image ID. */
+  lazy val mainImageBuildDef: Def.Initialize[Task[String]] = Def.task {
+    val logger = Keys.streams.value.log
+
+    // This task requires docker to be installed.
+    requireDocker.value
+
+    // This task requires that the dependency image be created, and that the main image be staged.
+    mainImageStageDef.value
+    dependencyBuildDef.value
+
+    // Build a new docker image.
+    val dockerCommand = Seq(
+      "docker",
+      "build",
+      "-t", fullImageName.value,
+      mainImageDir.value.toString
+    )
+    logger.info("Building main image . . .")
+    val exitCode = Process(dockerCommand).!
+    if (exitCode != 0) {
+      sys.error("Error running " + dockerCommand.mkString(" "))
+    }
+
+    "TODO"
+  }
+
   /** Adds the settings to configure the `dockerBuild` command. */
   override def projectSettings: Seq[Def.Setting[_]] = Seq(
     dockerfileLocation := {
@@ -445,6 +532,7 @@ $DOCKERFILE_SIGIL
     dockerWorkdir := "/stage",
     generateDockerfile := generateDockerfileDef.value,
     dockerDependencyStage := dependencyStageDef.value,
-    dockerMainStage := mainImageStageDef.value
+    dockerMainStage := mainImageStageDef.value,
+    dockerBuild := mainImageBuildDef.value
   )
 }
